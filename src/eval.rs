@@ -1,44 +1,46 @@
-use core::panic;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     ast::Expr,
     env::Env,
-    value::{UserFunction, Value},
+    value::{BuiltinFunc, UserFunction, Value},
 };
 
-pub fn eval(expr: &Expr, env: &mut Env) -> Value {
+pub fn eval(expr: &Expr, env: &mut Env) -> Result<Value, Box<EvalError>> {
     match expr {
-        Expr::Number(n) => Value::Number(*n),
-        Expr::Symbol(s) => env
-            .get(s)
-            .unwrap_or_else(|| panic!("Undefined variable: {}", s)),
+        Expr::Number(n) => Ok(Value::Number(*n)),
+        Expr::Symbol(s) => Ok(env.get(s).ok_or(EvalError::UnboundSymbol(s.clone()))?),
         Expr::List(list) => {
             if list.is_empty() {
-                panic!("Empty list");
+                return Ok(Value::Nil);
             }
             match &list[0] {
                 Expr::Symbol(s) if s == "define" => {
                     if list.len() != 3 {
-                        panic!("Invalid Syntax: define requires 2 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "define requires 2 arguments.".to_string(),
+                        }));
                     }
                     match &list[1] {
                         Expr::Symbol(name) => {
-                            let val = eval(&list[2], env);
+                            let val = eval(&list[2], env)?;
                             env.define(name, val.clone());
-                            val
+                            Ok(val)
                         }
                         Expr::List(fn_decl) => {
                             if let Some(Expr::Symbol(name)) = fn_decl.first() {
                                 let params: Vec<String> = fn_decl[1..]
                                     .iter()
                                     .map(|p| match p {
-                                        Expr::Symbol(s) => s.clone(),
-                                        _ => panic!(
-                                            "Invalid Syntax: function parameters must be symbols"
-                                        ),
+                                        Expr::Symbol(s) => Ok(s.clone()),
+                                        _ => Err(EvalError::InvalidSyntax {
+                                            expr: expr.clone(),
+                                            desc: "Function parameters must be symbols."
+                                                .to_string(),
+                                        }),
                                     })
-                                    .collect();
+                                    .collect::<Result<Vec<_>, EvalError>>()?;
                                 let body = list[2].clone();
                                 // manually evaluate the function body
                                 let func_env = Rc::new(RefCell::new(env.clone()));
@@ -46,110 +48,157 @@ pub fn eval(expr: &Expr, env: &mut Env) -> Value {
                                     params: params.clone(),
                                     body: body.clone(),
                                     env: Rc::clone(&func_env),
+                                    name: Some(name.clone()),
                                 });
                                 func_env.borrow_mut().vars.insert(name.clone(), val.clone());
 
                                 env.define(name, val.clone());
-                                val
+                                Ok(val)
                             } else {
-                                panic!("Invalid Syntax: function name must be a symbol");
+                                Err(Box::new(EvalError::InvalidSyntax {
+                                    expr: expr.clone(),
+                                    desc: "Function name must be a symbol.".to_string(),
+                                }))
                             }
                         }
-                        _ => {
-                            panic!("Invalid Syntax: define requires a symbol or a list");
-                        }
+                        _ => Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "define requires a symbol or a list".to_string(),
+                        })),
                     }
                 }
                 Expr::Symbol(s) if s == "lambda" => {
                     if list.len() != 3 {
-                        panic!("Invalid Syntax: lambda requires 2 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "lambda requires 2 arguments".to_string(),
+                        }));
                     }
                     let params = match &list[1] {
                         Expr::List(l) => l
                             .iter()
                             .map(|e| match e {
-                                Expr::Symbol(s) => s.clone(),
-                                _ => panic!("Invalid Syntax: lambda parameters must be symbols"),
+                                Expr::Symbol(s) => Ok(s.clone()),
+                                _ => Err(EvalError::InvalidSyntax {
+                                    expr: expr.clone(),
+                                    desc: "lambda parameters must be symbols".to_string(),
+                                }),
                             })
-                            .collect::<Vec<_>>(),
-                        _ => panic!("Invalid Syntax: lambda parameters must be a list"),
+                            .collect::<Result<Vec<_>, EvalError>>()?,
+                        _ => {
+                            return Err(Box::new(EvalError::InvalidSyntax {
+                                expr: expr.clone(),
+                                desc: "lambda parameters must be a list".to_string(),
+                            }));
+                        }
                     };
                     let body = list[2].clone();
-                    Value::Function(UserFunction {
+                    Ok(Value::Function(UserFunction {
                         params,
                         body,
                         env: Rc::new(RefCell::new(env.clone())),
-                    })
+                        name: None,
+                    }))
                 }
                 Expr::Symbol(s) if s == "and" => {
                     if list.len() < 3 {
-                        panic!("Invalid Syntax: and requires at least 2 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "and requires at least 2 arguments".to_string(),
+                        }));
                     }
                     for arg in &list[1..] {
-                        let val = eval(arg, env);
+                        let val = eval(arg, env)?;
                         match val {
                             Value::Bool(true) => {
                                 continue;
                             }
                             Value::Bool(false) => {
-                                return Value::Bool(false);
+                                return Ok(Value::Bool(false));
                             }
                             _ => {
-                                panic!("Invalid Syntax: and requires boolean arguments");
+                                return Err(Box::new(EvalError::InvalidSyntax {
+                                    expr: expr.clone(),
+                                    desc: "and requires boolean arguments".to_string(),
+                                }));
                             }
                         }
                     }
-                    Value::Bool(true)
+                    Ok(Value::Bool(true))
                 }
                 Expr::Symbol(s) if s == "or" => {
                     if list.len() < 3 {
-                        panic!("Invalid Syntax: or requires at least 2 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "or requires at least 2 arguments".to_string(),
+                        }));
                     }
                     for arg in &list[1..] {
-                        let val = eval(arg, env);
+                        let val = eval(arg, env)?;
                         match val {
                             Value::Bool(true) => {
-                                return Value::Bool(true);
+                                return Ok(Value::Bool(true));
                             }
                             Value::Bool(false) => {
                                 continue;
                             }
                             _ => {
-                                panic!("Invalid Syntax: or requires boolean arguments");
+                                return Err(Box::new(EvalError::InvalidSyntax {
+                                    expr: expr.clone(),
+                                    desc: "or requires boolean arguments".to_string(),
+                                }));
                             }
                         }
                     }
-                    Value::Bool(false)
+                    Ok(Value::Bool(false))
                 }
                 Expr::Symbol(s) if s == "not" => {
                     if list.len() != 2 {
-                        panic!("Invalid Syntax: not requires 1 argument");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "not requires 1 argument".to_string(),
+                        }));
                     }
-                    let val = eval(&list[1], env);
+                    let val = eval(&list[1], env)?;
                     match val {
-                        Value::Bool(b) => Value::Bool(!b),
-                        _ => panic!("Invalid Syntax: not requires a boolean argument"),
+                        Value::Bool(b) => Ok(Value::Bool(!b)),
+                        _ => Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "not requires a boolean argument".to_string(),
+                        })),
                     }
                 }
                 Expr::Symbol(s) if s == "if" => {
                     if list.len() != 4 {
-                        panic!("Invalid Syntax: if requires 3 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "if requires 3 arguments".to_string(),
+                        }));
                     }
-                    let cond = eval(&list[1], env);
+                    let cond = eval(&list[1], env)?;
                     match cond {
                         Value::Bool(true) => eval(&list[2], env),
                         Value::Bool(false) => eval(&list[3], env),
-                        _ => panic!("Invalid Syntax: if requires a boolean condition"),
+                        _ => Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "if condition must be a boolean".to_string(),
+                        })),
                     }
                 }
                 Expr::Symbol(s) if s == "cond" => {
                     if list.len() < 3 {
-                        panic!("Invalid Syntax: cond requires at least 2 arguments");
+                        return Err(Box::new(EvalError::InvalidSyntax {
+                            expr: expr.clone(),
+                            desc: "cond requires at least 2 arguments".to_string(),
+                        }));
                     }
                     for pair in &list[1..] {
                         if let Expr::List(l) = pair {
                             if l.len() != 2 {
-                                panic!("Invalid Syntax: cond pairs must have 2 elements");
+                                return Err(Box::new(EvalError::InvalidSyntax {
+                                    expr: expr.clone(),
+                                    desc: "cond requires a list of pairs".to_string(),
+                                }));
                             }
                             let (cond, val) = (&l[0], &l[1]);
                             if let Expr::Symbol(s) = cond {
@@ -157,31 +206,52 @@ pub fn eval(expr: &Expr, env: &mut Env) -> Value {
                                     return eval(val, env);
                                 }
                             }
-                            if let Value::Bool(flag) = eval(cond, env) {
+                            let cond_val = eval(cond, env)?;
+                            if let Value::Bool(flag) = cond_val {
                                 if flag {
                                     return eval(val, env);
                                 }
                             } else {
-                                panic!("Invalid Syntax: cond requires boolean conditions");
+                                return Err(Box::new(EvalError::TypeError {
+                                    expected: "bool".to_string(),
+                                    found: cond_val,
+                                    in_expr: cond.clone(),
+                                }));
                             }
                         } else {
-                            panic!("Invalid Syntax: cond requires a list of pairs");
+                            return Err(Box::new(EvalError::InvalidSyntax {
+                                expr: expr.clone(),
+                                desc: "cond requires a list of pairs".to_string(),
+                            }));
                         }
                     }
-                    panic!("No true condition found in cond");
+                    Err(Box::new(EvalError::InvalidSyntax {
+                        expr: expr.clone(),
+                        desc: "cond requires at least one else clause".to_string(),
+                    }))
                 }
                 func_expr => {
-                    let func = eval(func_expr, env);
-                    let args: Vec<Value> = list[1..].iter().map(|arg| eval(arg, env)).collect();
+                    let func = eval(func_expr, env)?;
+                    let args: Vec<Value> = list[1..]
+                        .iter()
+                        .map(|arg| eval(arg, env))
+                        .collect::<Result<Vec<Value>, Box<EvalError>>>()?;
                     match func {
-                        Value::BuiltinFunction(f) => f(args),
+                        Value::BuiltinFunction(BuiltinFunc { func: f, .. }) => {
+                            f(args, expr.clone())
+                        }
                         Value::Function(UserFunction {
                             params,
                             body,
                             env: func_env,
+                            name: _,
                         }) => {
                             if params.len() != args.len() {
-                                panic!("Invalid number of argumetns");
+                                return Err(Box::new(EvalError::ArityMismatch {
+                                    expected: params.len(),
+                                    found: args.len(),
+                                    in_expr: expr.clone(),
+                                }));
                             }
                             let mut local_env = func_env.borrow().clone();
                             for (name, val) in params.iter().zip(args.into_iter()) {
@@ -190,10 +260,34 @@ pub fn eval(expr: &Expr, env: &mut Env) -> Value {
 
                             eval(&body, &mut local_env)
                         }
-                        _ => panic!("First element is not a function"),
+                        _ => Err(Box::new(EvalError::TypeError {
+                            expected: "function".to_string(),
+                            found: func,
+                            in_expr: func_expr.clone(),
+                        })),
                     }
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum EvalError {
+    UnboundSymbol(String),
+    InvalidSyntax {
+        expr: Expr,
+        desc: String,
+    },
+    TypeError {
+        expected: String,
+        found: Value,
+        in_expr: Expr,
+    },
+    ArityMismatch {
+        expected: usize,
+        found: usize,
+        in_expr: Expr,
+    },
+    OtherError(String),
 }

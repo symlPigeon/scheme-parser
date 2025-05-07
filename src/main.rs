@@ -18,6 +18,10 @@ fn main() {
         let mut tokens = tokenize(&input);
         let expr = parse(&mut tokens);
         let result = eval(&expr, &mut env);
-        println!("{:?}", result);
+        if result.is_err() {
+            println!("Error: {:#?}", result.as_ref().err().unwrap());
+        } else {
+            println!("{}", result.unwrap());
+        }
     }
 }
